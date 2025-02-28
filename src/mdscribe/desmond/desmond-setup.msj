@@ -1,0 +1,31 @@
+task {
+    task = "desmond:auto"
+}
+
+build_geometry {
+    add_counterion = {
+        ion = K
+        number = neutralize_system
+    }
+    box = {
+        shape = orthorhombic
+        size = [10.0 10.0 10.0 ]
+        size_type = buffer
+    }
+    membrane_box = {
+        lipid = POPC
+        size = [10.0 10.0 10.0 ]
+    }
+    override_forcefield = S-OPLS
+    rezero_system = true
+    salt = {
+        concentration = 0.15
+        negative_ion = Cl
+        positive_ion = K
+    }
+    solvent = SPC
+}
+
+assign_forcefield {
+    forcefield = S-OPLS
+}

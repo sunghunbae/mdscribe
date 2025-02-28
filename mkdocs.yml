@@ -1,0 +1,40 @@
+site_name: MDScribe Documentation
+
+theme:
+    features:
+        - search.suggest
+        - search.highlight
+        - search.share
+        - content.code.select
+        - content.code.copy
+        - toc.integrate
+        - navigation.top
+        - navigation.footer
+    name: material
+
+nav:
+    - Install: index.md
+    - Desmond: desmond.md
+    - OpenMM: openmm.md
+    - Ternary Complex: ternary.md
+    - Helper: helper.md
+
+plugins:
+    - search
+    - autorefs
+    - offline
+    - mkdocstrings:
+        default_handler: python
+        handlers:
+            python:
+                options:
+                    docstring_style: google
+                    show_if_no_docstring: true
+                    show_root_heading: true
+                    show_source: true
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      linenums_style: pymdownx-inline
+  - pymdownx.superfences

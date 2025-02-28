@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mdscribe"
+dynamic = ["version"]
+requires-python = ">=3.11"
+dependencies = ["pyparsing>=3.0", "dotmap>=1.3", "openmm", "mkdocstrings-python",]
+authors = [{name = "Sung-Hun Bae", email="sunghun.bae@gmail.com"}, ]
+maintainers = [{name = "Sung-Hun Bae", email="sunghun.bae@gmail.com"}, ]
+description = "A Toolset For Molecular Dynamics"
+readme = "README.md"
+license = {text = "MIT"}
+keywords = ["MD", "Molecular Dynamics", "OpenMM", "Desmond", "Amber"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage        = "https://github.com/sunghunbae/mdscribe"
+Documentation   = "https://github.com/sunghunbae/mdscribe"
+Repository      = "https://github.com/sunghunbae/mdscribe.git"
+Issues          = "https://github.com/sunghunbae/mdscribe/issues"
+Changelog       = "https://github.com/sunghunbae/mdscribe/blob/master/CHANGELOG.md"
+
+[project.scripts]
+mdinfo                  = "mdscribe.desmond.cli:mdinfo"
+batch-desmond-setup     = "mdscribe.desmond.cli:batch_setup"
+batch-desmond-min       = "mdscribe.desmond.cli:batch_min"
+batch-desmond-md        = "mdscribe.desmond.cli:batch_md"
+batch-desmond-metad     = "mdscribe.desmond.cli:batch_metad"
+batch-desmond-pli       = "mdscribe.desmond.cli:batch_pli"
+batch-desmond-extend    = "mdscribe.desmond.cli:batch_extend"
+batch-desmond-report    = "mdscribe.desmond.cli:batch_report"
+batch-desmond-dihedral  = "mdscribe.desmond.cli:batch_dihedral"
+batch-desmond-ligrmsd   = "mdscribe.desmond.cli:batch_ligrmsd"
+batch-desmond-rg        = "mdscribe.desmond.cli:batch_rg"
+
+[tool.setuptools.dynamic]
+version = {attr = "mdscribe.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"mdscribe.desmond" = ["*.cfg", "*.msj"]
+"mdscribe.desmond.script" = ["*.py"]

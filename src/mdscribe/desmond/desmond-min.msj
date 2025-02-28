@@ -1,0 +1,7 @@
+task { task = "desmond:auto" }
+simulate { 
+    cfg_file = "desmond_min_job_1.cfg" 
+    jobname = "$MASTERJOBNAME" 
+    dir = "." 
+    compress = "" 
+}

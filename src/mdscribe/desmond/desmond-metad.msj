@@ -1,0 +1,135 @@
+# Desmond standard NPT relaxation protocol
+# All times are in the unit of ps.
+# Energy is in the unit of kcal/mol.
+task {
+   task = "desmond:auto"
+   set_family = {
+      desmond = {
+         checkpt.write_last_step = no
+      }
+   }
+}
+
+simulate {
+   title       = "Brownian Dynamics NVT, T = 10 K, small timesteps, and restraints on solute heavy atoms, 100ps"
+   annealing   = off
+   time        = 100
+   timestep    = [0.001 0.001 0.003 ]
+   temperature = 10.0
+   ensemble = {
+      class = "NVT"
+      method = "Brownie"
+      brownie = {
+         delta_max = 0.1
+      }
+   }
+   restraints.new = [{
+      name = posre_harm
+      atoms = solute_heavy_atom
+      force_constants = 50.0
+   }]
+}
+
+simulate {
+   title       = "NVT, T = 10 K, small timesteps, and restraints on solute heavy atoms, 12ps"
+   annealing   = off
+   time        = 12
+   timestep    = [0.001 0.001 0.003]
+   temperature = 10.0
+   restraints.new = [{
+      name = posre_harm
+      atoms = solute_heavy_atom
+      force_constants = 50.0
+   }]
+   ensemble = {
+      class  = NVT
+      method = Langevin
+      thermostat.tau = 0.1
+   }
+
+   randomize_velocity.interval = 1.0
+   eneseq.interval             = 0.3
+   trajectory.center           = []
+}
+
+simulate {
+   title       = "NPT, T = 10 K, and restraints on solute heavy atoms, 12ps"
+   annealing   = off
+   time        = 12
+   temperature = 10.0
+   restraints.existing = retain
+   ensemble    = {
+      class  = NPT
+      method = Langevin
+      thermostat.tau = 0.1
+      barostat  .tau = 50.0
+   }
+
+   randomize_velocity.interval = 1.0
+   eneseq.interval             = 0.3
+   trajectory.center           = []
+}
+
+simulate {
+   title       = "NPT and restraints on solute heavy atoms, 12ps"
+   effect_if   = [["@*.*.annealing"] 'annealing = off temperature = "@*.*.temperature[0][0]"']
+   time        = 12
+   restraints.existing = retain
+   ensemble    = {
+      class  = NPT
+      method = Langevin
+      thermostat.tau = 0.1
+      barostat  .tau = 50.0
+   }
+
+   randomize_velocity.interval = 1.0
+   eneseq.interval             = 0.3
+   trajectory.center           = []
+}
+
+simulate {
+   title       = "NPT and no restraints, 24ps"
+   effect_if   = [["@*.*.annealing"] 'annealing = off temperature = "@*.*.temperature[0][0]"']
+   time        = 24
+   ensemble    = {
+      class  = NPT
+      method = Langevin
+      thermostat.tau = 0.1
+      barostat  .tau = 2.0
+   }
+
+   eneseq.interval   = 0.3
+   trajectory.center = solute
+}
+
+simulate {
+   cfg_file = "desmond_metadynamics_job_1.cfg"
+   jobname  = "$MAINJOBNAME"
+   dir      = "."
+   compress = ""
+   meta = {
+      cv = [
+         {atom = [ 0 0 0 0 ]
+          type = dihedral
+          width = 5.0
+         }
+      ]
+      cv_name = "$JOBNAME$[_replica$REPLICA$].cvseq"
+      first = 0.0
+      height = 0.03
+      interval = 0.09
+      name = "$JOBNAME$[_replica$REPLICA$].kerseq"
+   } 
+           backend ={
+               # set cvseq interval to trajectory output
+               force.term.ES.interval = '@*.*.*.*.trajectory.interval'
+           }
+           checkpt.write_last_step = yes
+        
+}
+
+analysis {
+    meta = { }
+    dir = "."
+    compress = ""
+}
