@@ -14,8 +14,14 @@ Install
 $ pip install mdscribe
 ```
 
-Usage for Desmond
-=================
+Documentation
+=============
+
+See https://sunghunbae.github.io/mdscribe/
+
+
+Example for Desmond
+===================
 
 ```python
 from mdscribe.desmond import Multisim
