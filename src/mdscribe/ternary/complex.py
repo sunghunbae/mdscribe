@@ -1,13 +1,17 @@
-import pathlib
+import sys
 import numpy as np
 import pandas as pd
+import yaml
 import parmed
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Union, Optional
+from typing import Dict, List, Tuple, Optional
+from pathlib import Path
 
-from mdscribe.helper import kabsch_algorithm, view_svg
+from mdscribe.helper import PDBfile, kabsch_algorithm, get_closest_distance, set_apart, view_svg
+
 from rdkit import Chem
+from rdkit.Chem import rdFMCS
 
 
 @dataclass
@@ -18,10 +22,10 @@ class Molecule:
     
     def coor(self) -> np.ndarray:
         return self.st.coordinates[self.idx,:]
-    
+
     def centroid(self) -> np.ndarray:
         return np.mean(self.coor(), axis=0)
-        
+
 
 @dataclass
 class Pocket:
@@ -52,7 +56,7 @@ class Pocket:
 @dataclass
 class Ligand:
     """Class for ligand information."""
-    st: parmed.structure.Structure
+    st: parmed.structure.Structure | None = None
     idx0: List[int] = field(default_factory=list) # all atoms
     idx: List[int] = field(default_factory=list) # non-hydrogens
     imap: Dict[int,int] = field(default_factory=dict) # pdb atom idx -> st atom idx
@@ -92,45 +96,229 @@ class Reference:
         return np.mean(self.coor(), axis=0)
 
 
-class Ternary:
-    """Class for ternary complex modeling."""
+class PreTernary:
+    """Staging proteins and ligand for ternary complex modeling."""
 
-    def __init__(self, 
-                 st: parmed.structure.Structure,
-                 molecules: Dict,
-                 references: Dict,
-                 ligand_resname: str,
-                 workdir: str | pathlib.Path = '.',
+    def __init__(self,
+                 config: Dict | str | Path,
+                 workdir: str | Path = '.',
                 ):
+       
+        if isinstance(config, str):
+            self.config = yaml.safe_load(Path(config).read_text())
+        elif isinstance(config, Path):
+            self.config = yaml.safe_load(config.read_text())
+        elif isinstance(config, dict):
+            self.config = config
 
-        # parmed.struct.Structure objects
-        self.st = st # md system
-        self.imap = {(a.residue.number,a.name) : a.idx for a in st.atoms}
-        self.molecule = {}
-        for k,v in molecules.items():
-            idx = [self.imap[(b.residue.number, b.name)] for b in st[v].atoms]
-            self.molecule[k] = Molecule(st, idx)
-        self.references = references
-        if not isinstance(workdir, pathlib.Path):
-            workdir = pathlib.Path(workdir)
+        self.references = self.config['references']
+
+        if not isinstance(workdir, Path):
+            workdir = Path(workdir)
         workdir.mkdir(parents=True, exist_ok=True)        
         self.workdir = workdir
+
+        self.molecule = {}
+        self.pocket = {}
+        self.ligand = {}
+        self.centroid = {}
+
         
+        try:
+            mol = Chem.MolFromSmiles(self.config['ligand']['smiles'])
+            assert mol
+            self.ligand['0'] = Ligand(mol=mol)
+        except:
+            print("Error: ligand cannot be defined")
+            sys.exit(1)
+
+        for k in self.references:
+            
+            try:
+                self.ligand[k] = Ligand(mol=Chem.MolFromSmiles(self.references[k]['ligand']['smiles']))
+                assert self.ligand[k]
+            except:
+                print(f"Error: invalid ligand SMILES for the reference {k}")
+                sys.exit(1)
+            
+            try:
+                mcs_res = rdFMCS.FindMCS([self.ligand['0'].mol, self.ligand[k].mol])
+                mcs_mol = Chem.MolFromSmarts(mcs_res.smartsString)
+                assert self.ligand['0'].mol.HasSubstructMatch(mcs_mol)
+                self.ligand[k].highlight = self.ligand[k].mol.GetSubstructMatch(mcs_mol) # tuple
+                self.ligand['0'].highlight += self.ligand['0'].mol.GetSubstructMatch(mcs_mol)
+            except:
+                print(f"Error: no common substructure between the ligand and the reference {k}")
+                sys.exit(1)
+            
+            self.references[k]["smarts"] = mcs_res.smartsString
+            
+            if isinstance(self.references[k]["pdb"], str):
+                pdb = parmed.load_file(self.references[k]["pdb"])
+            elif isinstance(self.references[k]["pdb"], Path):
+                pdb = parmed.load_file(self.references[k]["pdb"].as_posix())
+            self.molecule[k] = Molecule(st = pdb)
+            
+            self.pocket[k] = self.create_pocket(self.molecule[k].st, 
+                                                self.references[k]["ligand"]["resname"], 
+                                                self.references[k]["pocket"]["distance"],
+                                                self.references[k]["pocket"]["include"],
+                                                self.references[k]["pocket"]["exclude"],
+                                                )
+
+
+    def molview(self, 
+                ref_id:str | None = None, 
+                width:int=600, 
+                height:int=400) -> None:
+        """Depict a ligand with substructure highlights.
+
+        Args:
+            ref_id (str | None, optional): id of reference structure. Defaults to None.
+            width (int, optional): width. Defaults to 600.
+            height (int, optional): height. Defaults to 400.
+        """
+        if ref_id is None:
+            view_svg(self.ligand['0'].mol, 
+                     highlight=self.ligand['0'].highlight, 
+                     width=width, height=height)
+        else:
+            view_svg(self.ligand[ref_id].mol, 
+                     highlight=self.ligand[ref_id].highlight,
+                     width=width, height=height)
+
+
+    def create_pocket(self, 
+                      st : parmed.structure.Structure, 
+                      resname : str, 
+                      dist : float, 
+                      include : str, 
+                      exclude : str) -> Pocket:
+        """Create a Pocket class object.
+
+        Args:
+            st (parmed.structure.Structure): input structure.
+            resname (str): residue name for ligand.
+            dist (float): distance cutoff from ligand which is regarded as pocket.
+            include (str): residue or atom selection to include as pocket.
+            exclude (str): residue or atom selection to exlude from pocket.
+
+        Raises:
+            ValueError: when pocket cannot be defined.
+
+        Returns:
+            Pocket: object containing pocket information.
+        """
+        try:
+            # select all `pocket_atom` atoms within `pocket_dist` from the `ref_resname` residues and save to a pdb.
+            # the whole residue is selected if any atom satisfies the distance criteria
+            pocket = st[f"(:{resname}<:{dist})&(!:{resname})&({include})&!({exclude})"]
+            imap = {(a.residue.number, a.name) : a.idx for a in st.atoms}
+            indices = [imap[(b.residue.number, b.name)] for b in pocket.atoms]
+            assert len(pocket.residues) > 0
+            assert len(pocket.atoms) > 0
+        except:
+            raise ValueError("cannot define reference ligand binding pocket")
+
+        return Pocket(st=st, idx=indices, residues=pocket.residues, imap=imap)
+        
+
+    def distance(self) -> None:
+        """Summary of centroid distances.
+        """
+        for k in self.references:
+            self.centroid[k] = {
+                "pocket": self.pocket[k].centroid(),
+            }
+            print(f"Centroid({k}):")
+            for kk, v in self.centroid[k].items():
+                print(f"    {kk}: {v}")   
+        [k1, k2] = [ k for k in self.references ]
+        dpp = np.linalg.norm(self.centroid[k1]["pocket"] - self.centroid[k2]["pocket"])
+        print(f"Distance Centroid({k1} pocket)-Centroid({k2} pocket) {dpp:8.3f}")
+        cc = get_closest_distance(self.molecule[k1].st.coordinates, 
+                                  self.molecule[k2].st.coordinates)
+        print(f"Closest Distance: {cc:8.3f}")
+
+        
+    def stage(self, 
+              outfile: str | Path,
+              overwrite: bool = False,
+              r: float=20.0,
+              steric_clash_cutoff: float=3.0):
+        """Place molecule for MD simulation.
+
+        Args:
+            outfile (str | Path): _description_
+            overwrite (bool, optional): _description_. Defaults to False.
+            r (float, optional): _description_. Defaults to 20.0.
+            steric_clash_cutoff (float, optional): _description_. Defaults to 3.0.
+        """
+        
+        (fixed, movable) = [k for k in self.molecule ]
+        (trans, c, n) = set_apart(self.molecule[fixed].st.coordinates, 
+                                  self.molecule[movable].st.coordinates,
+                                  r, steric_clash_cutoff)
+        print(f"Setting apart {movable} coordinates (r= {r:4.1f}):")
+        print(f"    number of steric clashes (<{steric_clash_cutoff:3.1f}) : {n}")
+        print(f"    closest distance   : {c:4.1f}")
+        print(f"    translation vector : {trans}")
+        
+        pdb = PDBfile(self.references[movable]["pdb"])
+        pdb.transform(trans=trans)
+        if overwrite or \
+            (isinstance(outfile, str) and Path(outfile).exists()) or \
+            (isinstance(outfile, Path) and outfile.exists()):
+            print(f"    writing translated coordinates to {outfile}")
+            pdb.write(outfile)
+        else:
+            print(f"    skipping to write to {outfile} because it already exists.")
+
+
+
+class Ternary:
+    """Modeling a ternary complex."""
+
+    def __init__(self, 
+                 st:parmed.structure.Structure, 
+                 config: dict | str | Path, 
+                 workdir: str | Path = '.'):
+        self.st = st
+        self.imap = {(a.residue.number,a.name) : a.idx for a in self.st.atoms}
+        if isinstance(config, str):
+            self.config = yaml.safe_load(Path(config).read_text())
+        elif isinstance(config, Path):
+            self.config = yaml.safe_load(config.read_text())
+        elif isinstance(config, dict):
+            self.config = config
+        if isinstance(workdir, Path):
+            self.workdir = workdir
+        else:
+            self.workdir = Path(workdir)
+        self.workdir.mkdir(parents=True, exist_ok=True)        
+
+        self.references = self.config['references']
+        self.molecule = {}
+        for k, amber_mask in self.config['simulation']['topology'].items():
+            idx = [self.imap[(b.residue.number, b.name)] for b in self.st[amber_mask].atoms]
+            self.molecule[k] = Molecule(self.st, idx)
+
         self.map = {}
         self.map_data = {}
         self.ligand = {}
         self.pocket = {}
         self.ref = {}
-        self.rmsd_ref_coor = np.zeros((len(st.atoms), 3))
+        self.rmsd_ref_coor = np.zeros((len(self.st.atoms), 3))
         self.rmsd_idx_group = {}
         self.centroid = {}
         # reference coordinates for RMSDForce
         # should have identical number of coordinates as the self.st
         # even though all the coordinates are not used
 
-        self.ligand['0'] = self.create_ligand(st, ligand_resname, "structure-ligand")
+        self.ligand['0'] = self.create_ligand(self.st, 
+                                              self.config['ligand']['resname'], "structure-ligand")
         
-        for k in references:
+        for k in self.references:
             self.map_to_reference(k)
             self.rmsd_ref_coor[np.array(self.pocket[k].idx),:] = self.ref[k].pocket.coor()
             self.rmsd_ref_coor[np.array(self.ligand[k].idx),:] = self.ref[k].ligand.coor()
@@ -146,7 +334,7 @@ class Ternary:
 
         Args:
             st (parmed.structure.Structure): input structure.
-            resname (str): residue name for ligand.
+            resname (str): ligand residue name.
             prefix (str): prefix for output pdb file.
 
         Raises:
@@ -256,8 +444,7 @@ class Ternary:
             ValueError: when mapping fails.
         """
         pdb     = self.references[ref_id]["pdb"]
-        resname = self.references[ref_id]["resname"]
-        smarts  = self.references[ref_id]["smarts"]
+        resname = self.references[ref_id]["ligand"]["resname"]
         dist    = self.references[ref_id]["pocket"]["distance"]
         include = self.references[ref_id]["pocket"]["include"]
         exclude = self.references[ref_id]["pocket"]["exclude"]
@@ -266,7 +453,7 @@ class Ternary:
             print(f"Mapping to {ref_id}...")
             
         try:
-            if isinstance(pdb, pathlib.Path):
+            if isinstance(pdb, Path):
                 ref_st = parmed.load_file(pdb.as_posix())
             else:
                 ref_st = parmed.load_file(pdb)
@@ -276,33 +463,49 @@ class Ternary:
 
         self.map_data[ref_id] = {'ligand': {}, 'pocket': {}}
         
-        # reference ligand
+        # Ligand object
         ref_ligand = self.create_ligand(ref_st, resname, "reference-ligand")
-        
-        success = False
-        for _smarts in smarts:
-            query = Chem.MolFromSmarts(_smarts)
-            if not (self.ligand['0'].mol.HasSubstructMatch(query) and ref_ligand.mol.HasSubstructMatch(query)):
-                continue
-            ligand_match = self.ligand['0'].mol.GetSubstructMatch(query)
-            ref_match = ref_ligand.mol.GetSubstructMatch(query)
-            # GetSubstructMatch() returns the indices of the molecule’s atoms that match a substructure query.
-            # only a single match is returned
-            # the ordering of the indices corresponds to the atom ordering in the query. 
-            # For example, the first index is for the atom in this molecule that matches the first atom in the query.
-            # create a ligand substructure that matches with the reference in SMARTS
-            indices = [self.ligand['0'].imap[i] for i in ligand_match]
-            self.ligand[ref_id] = Ligand(self.st, idx=indices, mol=self.ligand['0'].mol, highlight=ligand_match)
-            ref_ligand.idx = [ref_ligand.imap[i] for i in ref_match]
-            ref_ligand.highlight = ref_match
-            success = True
-            break
-        assert success, 'No match found for the reference ligand SMARTS'
 
-        # reference pocket
+        # MCS search
+        mcs_res = rdFMCS.FindMCS([self.ligand['0'].mol, ref_ligand.mol])
+        query = Chem.MolFromSmarts(mcs_res.smartsString)
+
+        try:
+            assert self.ligand['0'].mol.HasSubstructMatch(query)
+            assert ref_ligand.mol.HasSubstructMatch(query)
+        except:
+            print(f"No common substructure between the ligand and the reference {ref_id}")
+            sys.exit(1)
+
+        self.references[ref_id]["smarts"] = mcs_res.smartsString
+
+        ligand_match = self.ligand['0'].mol.GetSubstructMatch(query)
+
+        ref_ligand_match = ref_ligand.mol.GetSubstructMatch(query)
+
+        # GetSubstructMatch() returns the indices of the molecule’s atoms 
+        # that match a substructure query (only a single match is returned)
+        # the ordering of the indices corresponds to the atom ordering in the query. 
+        # For example, the first index is for the atom in this molecule 
+        # that matches the first atom in the query.
+        # create a ligand substructure that matches with the reference in SMARTS
+
+        indices = [self.ligand['0'].imap[i] for i in ligand_match]
+
+        # ligand substructure that matches with the reference
+        self.ligand[ref_id] = Ligand(self.st, 
+                                     idx=indices, 
+                                     mol=self.ligand['0'].mol, 
+                                     highlight=ligand_match)
+        
+        # complete the Ligand object attributes
+        ref_ligand.idx = [ref_ligand.imap[i] for i in ref_ligand_match]
+        ref_ligand.highlight = ref_ligand_match
+
+        # reference Pocket object
         ref_pocket = self.create_pocket(ref_st, resname, dist, include, exclude)
 
-        # create a reference
+        # create a Reference object
         self.ref[ref_id] = Reference(st=ref_st, ligand=ref_ligand, pocket=ref_pocket)
 
         # mapping structure to the reference
@@ -333,7 +536,7 @@ class Ternary:
             assert len(rmap) > 0
         except:
             print("ref_pocket_residue_numbers", ref_pocket_residue_numbers)
-            print("ref_pocket_residue_nanes", ref_pocket_residue_names)
+            print("ref_pocket_residue_names", ref_pocket_residue_names)
             raise ValueError('No match found for the reference pocket.')
         
         indices = []
@@ -377,9 +580,16 @@ class Ternary:
             view_svg(self.ref[ref_id].ligand.mol, highlight=self.ref[ref_id].ligand.highlight)
 
     
-    def distance(self) -> None:
+    def distance(self) -> Dict[str, float]:
         """Summary of centroid distances.
+
+        Returns:
+            dict[str, float]: {ref_id: pocket-to-ligand distance}
         """
+        pocket_to_ligand_dist = {}
+
+        [k1, k2] = [ k for k in self.references ]
+
         for k in self.references:
             self.centroid[k] = {
                 "ref_pocket" : self.ref[k].pocket.centroid(),
@@ -387,17 +597,27 @@ class Ternary:
                 "pocket": self.pocket[k].centroid(),
                 "ligand": self.ligand[k].centroid(),
             }
+            
             print(f"Centroid({k}):")
+            
             for kk, v in self.centroid[k].items():
                 print(f"    {kk}: {v}")   
+            
             dpls = np.linalg.norm(self.centroid[k]["pocket"] - self.centroid[k]["ligand"])
             dplr = np.linalg.norm(self.centroid[k]["ref_pocket"] - self.centroid[k]["ref_ligand"])
-            print(f"Distance Centroid({k} pocket)-Centroid({k} ligand) {dpls:8.3f} (reference: {dplr:5.3f})")
-        [k1, k2] = [ k for k in self.references ]
+            
+            print(f"Distance Centroid({k} pocket)-Centroid({k} ligand) {dpls:8.3f}", end=" ")
+            print(f"(reference: {dplr:5.3f})")
+            
+            pocket_to_ligand_dist[k] = dplr
+
         dpp = np.linalg.norm(self.centroid[k1]["pocket"] - self.centroid[k2]["pocket"])
         dll = np.linalg.norm(self.centroid[k1]["ligand"] - self.centroid[k2]["ligand"])
+        
         print(f"Distance Centroid({k1} pocket)-Centroid({k2} pocket) {dpp:8.3f}")
         print(f"Distance Centroid({k1} ligand)-Centroid({k2} ligand) {dll:8.3f}")
+
+        return pocket_to_ligand_dist
 
 
     def rmsd(self) -> None:
@@ -463,15 +683,15 @@ class Ternary:
         return (transformed, centroid, rot, trans)
 
 
-    def save_molecule(self, molecule_id:str, path:str | pathlib.Path, overwrite:bool=True) -> None:
+    def save_molecule(self, molecule_id:str, path:str | Path, overwrite:bool=True) -> None:
         """Save molecular coordinates to an output file.
 
         Args:
             molecule_id (str): id of molecule.
-            path (str | pathlib.Path): output file path.
+            path (str | Path): output file path.
             overwrite (bool, optional): whether to overwrite. Defaults to True.
         """
-        if isinstance(path, pathlib.Path):
+        if isinstance(path, Path):
             path = path.as_posix()
         st = self.molecule[molecule_id].st
         st[self.molecule[molecule_id].idx].save(path, overwrite=overwrite)

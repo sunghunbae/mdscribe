@@ -1,13 +1,9 @@
-import io
-import os
 import sys
 import argparse
 import numpy as np
-import pandas as pd
 import warnings
 
 from pathlib import Path
-from typing import List, Optional
 
 
 try:
@@ -82,6 +78,8 @@ class PDBfile:
         for model in self.st:
             for chain in model:
                 for residue in chain:
+                    if residue.get_segid() is None:
+                        residue.set_segid(" ")
                     for atom in residue:
                         coords.append(atom.get_coord())
         self.coords = np.array(coords)
@@ -143,7 +141,7 @@ class PDBfile:
                 print("chain=", chain)
                 for residue in chain:
                     resname = residue.get_resname()
-                    if not resname in aminoacids:
+                    if not resname in protein_3_1:
                         continue
                     hetflag,resseq,iCode = residue.get_id()
                     resSeq = int(resseq)
@@ -155,7 +153,7 @@ class PDBfile:
                             sequence += "-" * num_missing_residues
                             print("(missing residues) %4d - %4d (%d)" %
                                 (prev_residue_number+1,resSeq-1,num_missing_residues))
-                    sequence += aminoacids[resname]
+                    sequence += protein_3_1[resname]
                     prev_residue_number = resSeq
                 print("(last residue) %4d" % resSeq)
                 # output
@@ -206,70 +204,83 @@ class PDBfile:
                     charge = line[78:80]
 
 
-    def write(self, filename: str | Path, 
-              model:Optional[List[int]] = None,
-              chain:Optional[List[str]] = None, 
-              resname:Optional[List[str]] = None,
-              resnumber:Optional[str] = None,
+    def write(self, 
+              filename: str | Path, 
+              model: list[int] | None = None,
+              chain: list[str] | None = None, 
+              resname: list[str] | None = None,
+              resseq: list[int] | None = None,
+              segid: list[str] | None = None,
               ) -> None:
         """Write to PDB with selections.
 
         Examples:
             >>> pdb.write(model=[0], chain=['A'])
-            write chain A and residues first-10,22-50,130-200,550,600-last
-            >>> pdb.write(chain=['A'], resnumber="-10,22-50,130-200,550,600-")
+            write chain A and residues 22-25
+            >>> pdb.write(chain=['A'], resseq=[22,23,24,25])
 
         Args:
             filename (str | Path): output filename or path
-            model (Optional[List[int]], optional): list of model numbers. Defaults to None.
-            chain (Optional[List[str]], optional): list of chain ids. Defaults to None.
-            resname (Optional[List[str]], optional): list of residue names. Defaults to None.
-            resnumber (Optional[str], optional): residue number ranges. Defaults to None.
+            model (list[int], optional): list of model numbers. Defaults to None.
+            chain (list[str], optional): list of chain ids. Defaults to None.
+            resname (list[str], optional): list of residue names. Defaults to None.
+            resseq (list[int], optional): list of residue numbers. Defaults to None.
+            segid (list[str], optional): list of segment identifiers. Defaults to None.
         """
         
-        io = PDBIO()
+        pdbio = PDBIO()
 
-        if (model is None) and (chain is None) and (resname is None) and (resnumber is None):
+        if (model is None) and (chain is None) and (resname is None) and (resseq is None):
+            
             # write structure as it as
-            io.set_structure(self.st)
+            pdbio.set_structure(self.st)
+        
         else: 
-            # write only select model(s), chain(s) or residue(s)
-            # select residues by numbers
-            if resnumber is not None:
-                select_resseqs = [tuple(map(lambda s: int(s) if s else -1, r.split("-"))) for r in resnumber.split(",")]
-                # for resnumber="-10,22-50,130-200,550,600-"
-                # [(-1, 10), (22, 50), (130, 200), (550,), (600, -1)]
+            # write only select model(s), chainId(s), resName(s), or resSeq(s)
+            
             builder = StructureBuilder()
             builder.init_structure(self.st.id)
+            last_segid = None
+
             for _model in self.st:
+                
+                # reject model
                 if (model is not None) and (_model.id not in model):
-                    continue # reject model
+                    continue 
+                
                 builder.init_model(_model.id, serial_num=None)
+                
                 for _chain in _model:
+                    
+                    # reject chain
                     if (chain is not None) and (_chain.id not in chain):
-                        continue # reject chain
+                        continue 
+                    
                     builder.init_chain(_chain.id)
+                    
                     for _residue in _chain:
-                        hetflag, resseq, iCode = _residue.get_id()
+                        
+                        _segid = _residue.get_segid() or " "
+                        hetflag, _resseq, iCode = _residue.get_id()
+
+                        if (segid is not None) and (_segid not in segid):
+                            continue
+
+                        # reject residue by residue name or resName
                         if (resname is not None) and (_residue.resname not in resname):
-                            continue # reject residue by name
-                        # select residue numbers
-                        include_flags = []
-                        for lu in select_resseqs:
-                            if len(lu) == 1:
-                                if lu == resseq:
-                                    include_flags.append(True)
-                                else:
-                                    include_flags.append(False)
-                            else:
-                                (l,u) = lu
-                                if (l == -1 or l <= resseq) and (u ==-1 or u >= resseq):
-                                    include_flags.append(True)
-                                else:
-                                    include_flags.append(False)
-                        if not any(include_flags):
-                            continue # reject residue by number
-                        builder.init_residue(_residue.resname, hetflag, resseq, iCode)
+                            continue 
+
+                        # reject residue by residue number or resSeq
+                        if (resseq is not None) and (_resseq not in resseq):
+                            continue 
+
+                        if last_segid is None or last_segid != _segid:
+                            # use init_seg and init_residue together 
+                            # to create residues with specific segment identifiers
+                            builder.init_seg(_segid)  # ensure segid is not None
+
+                        builder.init_residue(_residue.resname, hetflag, _resseq, iCode)
+                        
                         for atom in _residue:
                             builder.init_atom(atom.name, 
                                             atom.coord, 
@@ -280,10 +291,72 @@ class PDBfile:
                                             None, # serial_number
                                             atom.element,
                                             )
-            io.set_structure(builder.get_structure())
+            
+            pdbio.set_structure(builder.get_structure())
+
         with open(filename, "w") as f:
-            io.save(f)
+            pdbio.save(f)
         
+    
+    def restore(self, renum_txt: str | Path, ) -> None:
+        """Restore chain and residue numbers to those before pdb4amber using ..renum.txt.
+
+        Examples:
+            >>> pdb.restore(renum_txt="stdout_renum.txt")
+
+        Args:
+            renum_txt (str | Path): a pdb4amber output filename xxx_renum.txt.
+        """
+        
+        renum_dict = {}
+        build_dict = {}
+
+        with open(renum_txt, "r") as f:
+            # GLU A   167    GLU     1
+            # GLU A   168    GLU     2
+            # LEU A   169    LEU     3
+            for line in f:
+                (init_resName, 
+                 init_chainId, 
+                 init_resSeq, 
+                 curr_resName, 
+                 curr_resSeq) = line.strip().split()
+                assert init_resName == curr_resName, "somethings is wrong"
+                renum_dict[int(curr_resSeq)] = (init_chainId, int(init_resSeq))
+
+            for _model in self.st:
+                for _chain in _model:
+                    for _residue in _chain:
+                        hetflag, resseq, iCode = _residue.get_id()
+                        init_chainId, init_resSeq = renum_dict[resseq]
+                        atoms = [ _atom for _atom in _residue ]
+                        if init_chainId in build_dict:
+                            build_dict[init_chainId].append((hetflag, _residue.resname, init_resSeq, iCode, atoms))
+                        else:
+                            build_dict[init_chainId] = [(hetflag, _residue.resname, init_resSeq, iCode, atoms)]
+            
+        io = PDBIO()
+
+        builder = StructureBuilder()
+        builder.init_structure(self.st.id)
+        for _model in self.st:
+            builder.init_model(_model.id, serial_num=None)
+            for chainId in build_dict:
+                builder.init_chain(chainId)
+                for (hetflag, resname, resseq, iCode, atoms) in build_dict[chainId]:
+                    builder.init_residue(resname, hetflag, resseq, iCode)
+                    for atom in atoms:
+                        builder.init_atom(atom.name, 
+                                        atom.coord, 
+                                        atom.bfactor, 
+                                        atom.occupancy,
+                                        atom.altloc,
+                                        atom.fullname,
+                                        None, # serial_number
+                                        atom.element,
+                                        )
+        self.st = builder.get_structure()
+
 
 
     def reorder(self) -> None:
@@ -311,9 +384,10 @@ class PDBfile:
 
 
     def rename(self, 
-               chain:Optional[dict] = None, 
-               resname:Optional[dict] = None, 
-               atom:Optional[dict] = None) -> None:
+               chain: dict | None = None, 
+               resname: dict | None = None,
+               resnumber: dict | None =  None,
+               atom: dict | None = None) -> None:
         """Rename PDB chains/residues/atoms.
 
         Examples:
@@ -333,75 +407,82 @@ class PDBfile:
             >>> rename(chain={"C:C"}, resname={"UNL":"UNL"}, atom={"H1" : "H11", "H2": "H12"})
 
         Args:
-            chain (Optional[dict], optional): map of chain ids {old:new}. Defaults to None.
-            resname (Optional[dict], optional): map of residue names {old:new}. Defaults to None.
-            atom (Optional[dict], optional): map of atom names {old:new}. Defaults to None.
+            chain (dict, optional): map of chain ids {old:new}. Defaults to None.
+            resname (dict, optional): map of residue names {old:new}. Defaults to None.
+            atom (dict, optional): map of atom names {old:new}. Defaults to None.
         """
         for model in self.st:
             for _chain in model:
-                if chain is None:
-                    subject_chains = [c.id for c in model.get_chains()]
-                else:
-                    subject_chains = [k for k in chain]
+                # if chain is None:
+                #     subject_chains = [c.id for c in model.get_chains()]
+                # else:
+                #     subject_chains = [k for k in chain]
                 
-                if _chain.id not in subject_chains:
-                    continue
+                # if _chain.id not in subject_chains:
+                #     continue
                 
                 if chain:
                     old_chain_id = _chain.id
-                    new_chain_id = chain[old_chain_id]
+                    if old_chain_id in chain:
+                        new_chain_id = chain[old_chain_id]
+                    else:
+                        new_chain_id = old_chain_id
+
                     _chain.id = new_chain_id
+
                     if old_chain_id != new_chain_id:
                         print(f"renamed chain id : ", end=" ")
                         print(f"{old_chain_id}", end=" -> ")
                         print(f"{new_chain_id}")
                         
                 for _residue in _chain:
-                    if resname is None:
-                        subject_resnames = [r.resname for r in _chain.get_residues()]
-                    else:
-                        subject_resnames = [k for k in resname]
+                    # if resname is None:
+                    #     subject_resnames = [r.resname for r in _chain.get_residues()]
+                    # else:
+                    #     subject_resnames = [k for k in resname]
                     
-                    if _residue.resname not in subject_resnames:
-                        continue
+                    # if _residue.resname not in subject_resnames:
+                    #     continue
 
                     hetflag, resseq, iCode = _residue.get_id()
+                    init_resname = _residue.resname
+                    init_resnumber = resseq
+                    residue_modified = False
+
+                    if resname and (init_resname in resname):
+                        _residue.resname = resname[init_resname]
+                        residue_modified = True
                     
-                    if resname:
-                        old_resname = _residue.resname
-                        new_resname = resname[old_resname]
-                        _residue.resname = new_resname
-                        if old_resname != new_resname:
-                            print(f"renamed residue {_chain.id}", end=" : ")
-                            print(f"{old_resname}({resseq})", end=" ->")
-                            print(f"{new_resname}({resseq})")
-                    else:
-                        old_resname = None
-                        new_resname = None
+                    if resnumber and (init_resnumber in resnumber):
+                        _residue.id = (hetflag, resnumber[init_resnumber], iCode)
+                        residue_modified = True
+
+                    if residue_modified:
+                        print(f"renamed residue {_chain.id}", end=" : ")
+                        print(f"{init_resname}({init_resnumber})", end=" ->")
+                        print(f"{_residue.resname}({_residue.id[1]})")
                         
                     for _atom in _residue:
-                        if atom is None:
-                            subject_atoms = [a.name for a in _residue.get_atoms()]
-                        else:
-                            subject_atoms = [k for k in atom]
+                        # if atom is None:
+                        #     subject_atoms = [a.name for a in _residue.get_atoms()]
+                        # else:
+                        #     subject_atoms = [k for k in atom]
                         
-                        if _atom.name not in subject_atoms:
-                            continue
-
-                        if atom:
-                            old_atom_name = _atom.name
-                            new_atom_name = atom[old_atom_name]
-                            _atom.name = new_atom_name
-                            if old_atom_name != new_atom_name:
-                                print(f"renamed atom {_chain.id}.{_residue.resname}({resseq})", end=" : ")
-                                print(f"{old_atom_name}", end=" -> ")
-                                print(f"{new_atom_name}")
+                        # if _atom.name not in subject_atoms:
+                        #     continue
+                        init_atom_name = _atom.name
+                        if atom and (init_atom_name in atom):
+                            _atom.name = atom[init_atom_name]
+                        if _atom.name != init_atom_name:
+                            print(f"renamed atom {_chain.id}.{_residue.resname}({resseq})", end=" : ")
+                            print(f"{init_atom_name}", end=" -> ")
+                            print(f"{_atom.name}")
 
 
     def reorient(self, 
-                 residue_selection:str="", 
-                 invert_Z:bool=False, 
-                 offset:np.ndarray=np.array([0.,0.,0.])) -> None:
+                 residue_selection: str = "", 
+                 invert_Z: bool = False, 
+                 offset: np.ndarray = np.array([0.,0.,0.])) -> None:
         """Reorient coordinates according to the principal axis.
 
         Examples:
@@ -545,7 +626,7 @@ class PDBfile:
 
 
 
-def renumber(residue:Optional[dict]):
+def renumber(residue: dict | None = None):
     pass
 
 

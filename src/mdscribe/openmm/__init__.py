@@ -1,7 +1,6 @@
-from .simulate import prepare_simulation, simulate_states, run_equilibration
+from .simulate import prepare_simulation, pre_equilibrate
 
 __all__ = [
     'prepare_simulation',
-    'simulate_states',
-    'run_equilibration',
+    'pre_equilibrate',
     ]

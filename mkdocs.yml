@@ -1,4 +1,4 @@
-site_name: MDScribe Documentation
+site_name: MDScribe
 
 theme:
     features:
@@ -14,7 +14,6 @@ theme:
 
 nav:
     - Install: index.md
-    - Desmond: desmond.md
     - OpenMM: openmm.md
     - Ternary Complex: ternary.md
     - Helper: helper.md

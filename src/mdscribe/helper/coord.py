@@ -252,28 +252,169 @@ def hexagonal_grid() -> np.ndarray:
 
 
 
-def avoid_clash(fixed:np.ndarray, movable:np.ndarray, max_move:float=25.0, clash_cutoff:float=5.0, max_trials:int=1000) -> Tuple[int, int, float, np.ndarray]:
-    """Find a translation vector for `movable` coordinates to avoid steric clashes.
+def get_closest_distance(fixed:np.ndarray, 
+                         movable:np.ndarray) -> float:
+    """Get the closest distance between two sets of coordinates.
+
+    Args:
+        fixed (np.ndarray): input coordinates.
+        movable (np.ndarray): input coordinates.
+
+    Returns:
+        float: the closest distance
+    """
+    kd = KDTree(fixed)
+    distances, indices = kd.query(movable)
+    return np.min(distances)
+
+
+
+def spherical_points(r:float, rstep:float, azstep:float) -> np.ndarray:
+    """3D coordinates evenly distributed on a sphere.
+
+    The spherical coordinates are defined by a radius, polar angle (theta), and azimuthal angle (phi).
+    Cartesian coordinates are defined by:
+        x = r sin(theta) cos(phi)
+        y = r sin(theat) sin(phi)
+        z = r cos(theta)
+    Because dA = r^2 sin(theta) dtheta dphi = r d(r cos(theta)) dphi = r dz dphi,
+    Evenly distributed points should be sampled by evenly choosing z and phi.
+
+    Args:
+        r (float): radius
+        rstep (float, optional): radius step.
+        azstep (float, optional): azimuthal angle step.
+    """
+    points = []
+    for z in np.arange(-r, r, rstep):
+        rz = np.sqrt(r**2 - z**2)
+        for az in np.arange(0.0, 2.0*np.pi, azstep):
+            # azimuthal angle or rotation around z-axis
+            x = rz * np.cos(az)
+            y = rz * np.sin(az)
+            points.append((x,y,z))
+
+    return np.unique(np.array(points), axis=0)
+
+
+def rotation_matrix_from_axis_angle(axis:np.ndarray, angle:float) -> np.ndarray:
+    """Calculates a rotation matrix from a rotation axis and angle."""
+    axis = axis / np.linalg.norm(axis)  # Normalize axis
+    c = np.cos(angle)
+    s = np.sin(angle)
+    x, y, z = axis
+    rot_mat = np.array([
+        [c + (1 - c) * x**2, (1 - c) * x * y - s * z, (1 - c) * x * z + s * y],
+        [(1 - c) * y * x + s * z, c + (1 - c) * y**2, (1 - c) * y * z - s * x],
+        [(1 - c) * z * x - s * y, (1 - c) * z * y + s * x, c + (1 - c) * z**2]
+    ])
+
+    return rot_mat
+
+
+def rotate_z_to_point(P:np.ndarray) -> np.ndarray:
+    """Calculates rotation matrix to rotate z-axis to a given point on unit sphere."""
+    z_axis = np.array([0, 0, 1])
+    rotation_axis = np.cross(z_axis, P)
+    if np.allclose(rotation_axis, 0):
+        if np.allclose(z_axis, P):
+            return np.eye(3)
+        rotation_axis = np.array([0, 1, 0])
+    angle = np.arccos(np.dot(z_axis, P))
+
+    return rotation_matrix_from_axis_angle(rotation_axis, angle)
+
+
+
+def uniform_rotation_matrices(rstep:float, azstep:float) -> List[np.ndarray]:
+    """Generate evenly distributed rotation matrices.
+
+    In Fast Random Rotation Matrices (James Avro, 1992), 
+    a method for uniform random 3D rotation matrices is outlined, the main steps being:
+
+        1. A random rotation about the z axis
+        2. Rotate the (unmoved) z unit vector to a random position on the unit sphere
+    
+    https://www.blopig.com/blog/2021/08/uniformly-sampled-3d-rotation-matrices/
+
+    Returns:
+        List[np.ndarray]: a list of rotation matrices
+    """
+    unit_sphere_points = spherical_points(1.0, rstep, azstep)
+    
+    U = []
+    for az in np.arange(0, 2.*np.pi, azstep):
+        R1 = np.array([
+            [  np.cos(az), np.sin(az), 0.0 ],
+            [ -np.sin(az), np.cos(az), 0.0 ],
+            [   0.0      ,  0.0      , 1.0 ]])
+        for P in unit_sphere_points:
+            R2 = rotate_z_to_point(P)
+            U.append(R2 * R1)
+    V = np.array(U)
+    return np.unique(V, axis=0)
+
+
+def set_apart(fixed:np.ndarray, 
+              movable:np.ndarray,
+              r:float = 20.0, 
+              steric_clash_cutoff:float=3.0,
+              fixed_subidx : Optional[List[int]] = None,
+              movable_subidx : Optional[List[int]] = None,
+              ) -> Tuple[np.ndarray, float, int]:
+    """Find a translation for `movable` coordinates that satisfies the closest distance within desired range.
 
     Args:
         fixed (np.ndarray): coordinates to be fixed.
         movable (np.ndarry): coordinates to be moved.
-        max_move (float, optional): maximum translation. Defaults to 25.0.
-        clash_cutoff (float, optional): distance considered as potential clash. Defaults to 5.0.
+        r (float, optional): pocket-to-pocket distance. Defaults to 20.0.
+
+    Returns:
+        (np.ndarray,float,int,int): (trans, closest_distance, num_violations, num_trials)
+    """
+    kd = KDTree(fixed)
+    points_on_sphere = spherical_points(r, rstep=2.0, azstep=np.pi/3.0)
+    closest_distance = []
+    steric_clash = []
+    for trans in points_on_sphere:
+        coords = movable + trans
+        distances, indices = kd.query(coords)
+        closest_distance.append(np.min(distances))
+        steric_clash = np.sum(distances < steric_clash_cutoff)
+    i = np.argmax(closest_distance)
+    return (points_on_sphere[i], closest_distance[i], steric_clash[i])
+
+
+def set_closest_distance(fixed:np.ndarray,
+                         movable:np.ndarray, 
+                         min_dist:float=5.0,
+                         max_dist:float=25.0,
+                         max_trials:int=1000) -> Tuple[np.ndarray, float, int, int]:
+    """Find a translation for `movable` coordinates that satisfies the closest distance within desired range.
+
+    Args:
+        fixed (np.ndarray): coordinates to be fixed.
+        movable (np.ndarry): coordinates to be moved.
+        min_dist (float, optional): minimum distance allowed. Defaults to 5.0.
+        max_dist (float, optional): maximum translation. Defaults to 25.0.
         max_trials (int, optional): maximum number of trials. Defaults to 1000.
 
     Returns:
-        (int,int,float,np.ndarray): (num_trials, clash_count, closest_dist, trans)
+        (np.ndarray,float,int,int): (trans, closest_distance, num_violations, num_trials)
     """
     kd = KDTree(fixed)
+    distances, indices = kd.query(movable)
+    closest_dist = np.min(distances)
+    num_violations = np.sum(distances < min_dist) + np.sum(distances > max_dist) # array of True(1) or False(0)
     num_trials = 0
-    clash_count = 1
-    while clash_count > 0 and num_trials < max_trials:
+    trans = np.array([0.0, 0.0, 0.0])
+    while num_violations > 0 and num_trials < max_trials:
         num_trials += 1
+        max_move = abs(0.5*(max_dist + min_dist) - closest_dist)
         trans = max_move * (2.0*np.random.rand(3) -1.0) 
         # numpy.random.rand() generates [0,1) so 2x-1 -> [-1,+1)
         coords = movable + trans
         distances, indices = kd.query(coords)
-        clash_count = np.sum(distances < clash_cutoff)
+        num_violations = np.sum(distances < min_dist) + np.sum(distances > max_dist) # array of True(1) or False(0)
         closest_dist = np.min(distances)
-    return (num_trials, clash_count, closest_dist, trans)
+    return (trans, closest_dist, num_violations, num_trials)
