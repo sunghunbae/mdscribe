@@ -203,21 +203,49 @@ class PDBfile:
                     element = line[76:78]
                     charge = line[78:80]
 
+    
+    @staticmethod
+    def expand_residues(txt: str) -> list[int]:
+        """_summary_
+
+        Args:
+            txt (str): residue number selection string.
+            e.g. "1-10,12,15-20" will be expanded to [1,2,3,4,5,6,7,8,9,10,12,15,16,17,18,19,20]
+
+        Returns:
+            list[int]: list of residue numbers.
+        """
+        residues = []
+        step1 = txt.split(",")
+        for item in step1:
+            step2 = item.split("-")
+            if len(step2) == 2:
+                residues += range(int(step2[0]), int(step2[1])+1)
+            elif len(step2) == 1:
+                residues += [ int(step2[0]) ]
+        return sorted(residues)
+    
 
     def write(self, 
               filename: str | Path, 
-              model: list[int] | None = None,
-              chain: list[str] | None = None, 
-              resname: list[str] | None = None,
-              resseq: list[int] | None = None,
-              segid: list[str] | None = None,
+              model: list[int] | str | None = None,
+              chain: list[str] | str | None = None, 
+              resname: list[str] | str | None = None,
+              resseq: list[int] | str | None = None,
+              segid: list[str] | str | None = None,
               ) -> None:
         """Write to PDB with selections.
 
         Examples:
             >>> pdb.write(model=[0], chain=['A'])
             write chain A and residues 22-25
+            >>> pdb.write(chain='A,B', resname=['GLU', 'LYS'])
             >>> pdb.write(chain=['A'], resseq=[22,23,24,25])
+            >>> pdb.write(chain=['A'], resname=['GLU', 'LYS'])
+            >>> pdb.write(chain=['A'], resseq='22-25,27,30-35')
+            >>> pdb.write(chain=['A'], resname='GLU,LYS', resseq='22-25,27,30-35')
+            >>> pdb.write(chain=['A'], resname='GLU,LYS', resseq='22-25,27,30-35', segid=['A1'])
+            >>> pdb.write(filename='output.pdb', model=[0,1], chain='A,B', resname='GLU,LYS', resseq='22-25,27,30-35', segid=['A1','B1'])
 
         Args:
             filename (str | Path): output filename or path
@@ -230,12 +258,32 @@ class PDBfile:
         
         pdbio = PDBIO()
 
-        if (model is None) and (chain is None) and (resname is None) and (resseq is None):
+        if (model is None) and (chain is None) and (resname is None) and (resseq is None) and (segid is None):
             
             # write structure as it as
             pdbio.set_structure(self.st)
         
-        else: 
+        else:
+            if model is not None and isinstance(model, str):
+                # if model is a string, expand it to a list of integers
+                model = [int(m) for m in model.split(",")]
+
+            if chain is not None and isinstance(chain, str):
+                # if chain is a string, expand it to a list of strings
+                chain = chain.split(",")
+
+            if resname is not None and isinstance(resname, str):
+                # if resname is a string, expand it to a list of strings
+                resname = resname.split(",")
+
+            if resseq is not None and isinstance(resseq, str):
+                # if resseq is a string, expand it to a list of integers
+                resseq = PDBfile.expand_residues(resseq)
+            
+            if segid is not None and isinstance(segid, str):
+                # if segid is a string, expand it to a list of strings
+                segid = segid.split(",")
+
             # write only select model(s), chainId(s), resName(s), or resSeq(s)
             
             builder = StructureBuilder()
@@ -578,19 +626,6 @@ class PDBfile:
         # x += args.offset_x
         # y += args.offset_y
         # z += args.offset_z
-
-
-    @staticmethod
-    def expand_residues(txt):
-        residues = []
-        step1 = txt.split(",")
-        for item in step1:
-            step2 = item.split("-")
-            if len(step2) == 2:
-                residues += range(int(step2[0]), int(step2[1])+1)
-            elif len(step2) == 1:
-                residues += [ int(step2[0]) ]
-        return sorted(residues)
 
 
     def contacts(self, 
